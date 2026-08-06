@@ -67,7 +67,7 @@ python main.py
 
 ### 方式二：直接下载 exe（推荐给普通用户）
 
-前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新的 `网络修复工具.exe`，双击运行并同意 UAC 提权即可，**无需安装任何依赖**。
+前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新的 `NetRepair-v1.1.0.exe`，双击运行并同意 UAC 提权即可，**无需安装任何依赖**。
 
 ### 打包为独立 exe（开发者）
 
