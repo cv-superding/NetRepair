@@ -1,0 +1,30 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.spec
+*.egg-info/
+
+# ===== 构建产物 =====
+build/
+dist/
+assets/app.ico
+assets/version_info.txt
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+env/
+
+# ===== 开发 / 临时脚本（不入仓）=====
+_*.py
+docs/
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+
+# ===== 系统 / 杂项 =====
+.DS_Store
+Thumbs.db
+.workbuddy/
