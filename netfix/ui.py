@@ -81,7 +81,8 @@ from . import (
     engine,
 )
 from .icons import app_icon, make_pixmap
-from .sysutil import BACKUP_DIR, LOG_DIR, LOGGER, is_admin, open_in_explorer
+from . import sysutil
+from .sysutil import LOGGER, is_admin, open_in_explorer
 
 # ==================================================================== 配色
 
@@ -151,6 +152,15 @@ def _fmt_size(num: int) -> str:
     if num < 1024 * 1024:
         return f"{num / 1024:.1f} KB"
     return f"{num / 1024 / 1024:.1f} MB"
+
+
+def _saved_index(settings: QSettings, key: str, count: int) -> int:
+    """读取 QSettings 里保存的下拉框索引，钳制到有效范围，防止脏数据导致启动崩溃。"""
+    try:
+        idx = int(settings.value(key, 0))
+    except (TypeError, ValueError):
+        idx = 0
+    return min(max(idx, 0), count - 1)
 
 
 # ==================================================================== 通用控件
@@ -856,10 +866,11 @@ class DiagnoseInterface(BaseInterface):
             self._set_hero_icon("alert", _pick("#C42B1C", "#FF99A4"))
             return
 
-        for res in results:
-            card = self.cards.get(res.name)
-            if card:
-                card.setResult(res)
+        # 结果与 CHECKS 顺序一一对应；不能按名称查找——部分检查项返回的
+        # name 带后缀（如「外网直连（绕过代理）」），与卡片标题「外网直连」不一致，
+        # 按名称匹配会让这些卡片永远停在「检测中…」。
+        for card, res in zip(self.cards.values(), results):
+            card.setResult(res)
 
         level, text = diagnose.diagnose_conclusion(results)
         self.heroTitle.setText({
@@ -913,7 +924,7 @@ class LogInterface(BaseInterface):
         openBtn = TransparentPushButton(FIF.FOLDER, "打开目录", bar)
         copyBtn = TransparentPushButton(FIF.COPY, "复制全部", bar)
         clearBtn = TransparentPushButton(FIF.DELETE, "清空显示", bar)
-        openBtn.clicked.connect(lambda: open_in_explorer(LOG_DIR))
+        openBtn.clicked.connect(lambda: open_in_explorer(sysutil.LOG_DIR))
         copyBtn.clicked.connect(self._copy_all)
         clearBtn.clicked.connect(lambda: self.logView.clear())
         for b in (openBtn, copyBtn, clearBtn):
@@ -1013,7 +1024,7 @@ class BackupInterface(BaseInterface):
         refreshBtn = TransparentPushButton(FIF.SYNC, "刷新", bar)
         openBtn = TransparentPushButton(FIF.FOLDER, "打开备份目录", bar)
         refreshBtn.clicked.connect(self.reload)
-        openBtn.clicked.connect(lambda: open_in_explorer(BACKUP_DIR))
+        openBtn.clicked.connect(lambda: open_in_explorer(sysutil.BACKUP_DIR))
         for b in (refreshBtn, openBtn):
             b.setFixedHeight(30)
             lay.addWidget(b)
@@ -1089,6 +1100,7 @@ class AboutInterface(BaseInterface):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("aboutInterface", parent)
+        self._settings = QSettings("NetRepair", "NetRepair")
         self.vbox.setSpacing(20)
         self.vbox.setContentsMargins(28, 16, 28, 30)
         self.add_header("关于", "版本信息、外观设置与开源许可说明")
@@ -1207,6 +1219,7 @@ class AboutInterface(BaseInterface):
         self.themeCombo.addItems(["跟随系统", "浅色", "深色"])
         self.themeCombo.setFixedWidth(160)
         self.themeCombo.currentIndexChanged.connect(self._on_theme_changed)
+        self.themeCombo.setCurrentIndex(_saved_index(self._settings, "theme", 3))
         row1.addWidget(lbl)
         row1.addStretch(1)
         row1.addWidget(self.themeCombo)
@@ -1220,6 +1233,8 @@ class AboutInterface(BaseInterface):
         self.accentCombo.addItems([n for n, _ in _ACCENTS])
         self.accentCombo.setFixedWidth(160)
         self.accentCombo.currentIndexChanged.connect(self._on_accent_changed)
+        self.accentCombo.setCurrentIndex(
+            _saved_index(self._settings, "accent", len(_ACCENTS)))
         row2.addWidget(self.accentCombo)
         tl.addLayout(row2)
         self.vbox.addWidget(theme_card)
@@ -1241,15 +1256,12 @@ class AboutInterface(BaseInterface):
         _style_text(hint, line_height=1.7, letter=0.3)
         dl.addWidget(hint)
 
-        self._settings = QSettings("NetRepair", "NetRepair")
         self._custom_dir = self._settings.value("dataDir", "", type=str)
-
-        from .sysutil import DATA_DIR as _DEFAULT_DIR
 
         self._dirEdits: dict[str, "LineEdit"] = {}
         for key, text, default in (
-            ("logDir", "运行日志", LOG_DIR),
-            ("backupDir", "配置备份", BACKUP_DIR),
+            ("logDir", "运行日志", sysutil.LOG_DIR),
+            ("backupDir", "配置备份", sysutil.BACKUP_DIR),
         ):
             row = QHBoxLayout()
             row.setSpacing(10)
@@ -1391,22 +1403,28 @@ class AboutInterface(BaseInterface):
         self._settings.setValue("dataDir", self._custom_dir)
         self._settings.sync()
 
-        # 动态更新 sysutil 模块的目录变量（热生效）
-        import netfix.sysutil as _su
+        # 动态更新 sysutil 模块的目录变量（热生效）。
+        # 注意：engine / ui 均通过 sysutil.BACKUP_DIR 实时读取，
+        # 不能在导入时 from ... import BACKUP_DIR 拷贝值，否则这里改了也不生效。
         if self._custom_dir:
-            _su.DATA_DIR = self._custom_dir
-            _su.LOG_DIR = os.path.join(self._custom_dir, "logs")
-            _su.BACKUP_DIR = os.path.join(self._custom_dir, "backups")
+            sysutil.DATA_DIR = self._custom_dir
+            sysutil.LOG_DIR = os.path.join(self._custom_dir, "logs")
+            sysutil.BACKUP_DIR = os.path.join(self._custom_dir, "backups")
         else:
-            _su.DATA_DIR = _su._base_data_dir()
-            _su.LOG_DIR = os.path.join(_su.DATA_DIR, "logs")
-            _su.BACKUP_DIR = os.path.join(_su.DATA_DIR, "backups")
+            sysutil.DATA_DIR = sysutil._base_data_dir()
+            sysutil.LOG_DIR = os.path.join(sysutil.DATA_DIR, "logs")
+            sysutil.BACKUP_DIR = os.path.join(sysutil.DATA_DIR, "backups")
 
-        _su.ensure_dirs()
+        sysutil.ensure_dirs()
+
+        # 让备份页立即从新目录读取列表
+        backup_page = getattr(self.window(), "backupPage", None)
+        if backup_page is not None:
+            backup_page.reload()
 
         InfoBar.success(
             title="已保存",
-            content=f"数据目录已更新为 {_su.DATA_DIR}",
+            content=f"数据目录已更新为 {sysutil.DATA_DIR}",
             orient=Qt.Horizontal, isClosable=True,
             position=InfoBarPosition.TOP_RIGHT, duration=4000,
             parent=self.window())
@@ -1417,26 +1435,31 @@ class AboutInterface(BaseInterface):
         self._settings.remove("dataDir")
         self._settings.sync()
 
-        import netfix.sysutil as _su
-        _su.DATA_DIR = _su._base_data_dir()
-        _su.LOG_DIR = os.path.join(_su.DATA_DIR, "logs")
-        _su.BACKUP_DIR = os.path.join(_su.DATA_DIR, "backups")
-        _su.ensure_dirs()
+        sysutil.DATA_DIR = sysutil._base_data_dir()
+        sysutil.LOG_DIR = os.path.join(sysutil.DATA_DIR, "logs")
+        sysutil.BACKUP_DIR = os.path.join(sysutil.DATA_DIR, "backups")
+        sysutil.ensure_dirs()
 
-        self._dirEdits["logDir"].setText(_su.LOG_DIR)
-        self._dirEdits["backupDir"].setText(_su.BACKUP_DIR)
+        self._dirEdits["logDir"].setText(sysutil.LOG_DIR)
+        self._dirEdits["backupDir"].setText(sysutil.BACKUP_DIR)
+
+        backup_page = getattr(self.window(), "backupPage", None)
+        if backup_page is not None:
+            backup_page.reload()
 
         InfoBar.success(title="已恢复默认",
-                       content=f"数据目录已恢复为 {_su.DATA_DIR}",
+                       content=f"数据目录已恢复为 {sysutil.DATA_DIR}",
                        orient=Qt.Horizontal, isClosable=True,
                        position=InfoBarPosition.TOP_RIGHT, duration=3000,
                        parent=self.window())
 
     def _on_theme_changed(self, idx: int) -> None:
         setTheme([Theme.AUTO, Theme.LIGHT, Theme.DARK][idx])
+        self._settings.setValue("theme", idx)
 
     def _on_accent_changed(self, idx: int) -> None:
         setThemeColor(_ACCENTS[idx][1])
+        self._settings.setValue("accent", idx)
 
 
 # ==================================================================== 主窗口
@@ -1546,6 +1569,11 @@ class MainWindow(FluentWindow):
                 return
             worker.abort()
             worker.wait(3000)
+        # 诊断线程只读不改配置，无需询问；但退出前需等待其结束，
+        # 避免 QThread 仍在运行时被销毁导致进程崩溃
+        for diag_worker in (self.repairPage.diagWorker, self.diagnosePage.worker):
+            if diag_worker and diag_worker.isRunning():
+                diag_worker.wait(3000)
         LOGGER.info("===== 程序退出 =====")
         super().closeEvent(event)
 
@@ -1570,8 +1598,10 @@ def run_app() -> int:
     app_font.setStyleHint(QFont.StyleHint.SansSerif)
     app.setFont(app_font)
 
-    setTheme(Theme.AUTO)
-    setThemeColor(_ACCENTS[0][1])
+    # 恢复用户上次选择的主题与主题色（保存在 QSettings），避免每次启动被重置
+    settings = QSettings("NetRepair", "NetRepair")
+    setTheme([Theme.AUTO, Theme.LIGHT, Theme.DARK][_saved_index(settings, "theme", 3)])
+    setThemeColor(_ACCENTS[_saved_index(settings, "accent", len(_ACCENTS))][1])
 
     window = MainWindow()
     window.show()

@@ -26,8 +26,8 @@ import winreg
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import sysutil
 from .sysutil import (
-    BACKUP_DIR,
     LOGGER,
     CmdResult,
     ensure_dirs,
@@ -108,7 +108,7 @@ def backup_file(src: str, tag: str) -> str | None:
     ensure_dirs()
     if not os.path.isfile(src):
         return None
-    dst = os.path.join(BACKUP_DIR, f"{tag}_{_stamp()}.bak")
+    dst = os.path.join(sysutil.BACKUP_DIR, f"{tag}_{_stamp()}.bak")
     try:
         shutil.copy2(src, dst)
         LOGGER.info(f"已备份 {src} -> {dst}")
@@ -120,7 +120,7 @@ def backup_file(src: str, tag: str) -> str | None:
 
 def backup_json(data: dict, tag: str) -> str | None:
     ensure_dirs()
-    dst = os.path.join(BACKUP_DIR, f"{tag}_{_stamp()}.json")
+    dst = os.path.join(sysutil.BACKUP_DIR, f"{tag}_{_stamp()}.json")
     try:
         with open(dst, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -135,11 +135,11 @@ def list_backups() -> list[dict]:
     ensure_dirs()
     out: list[dict] = []
     try:
-        names = os.listdir(BACKUP_DIR)
+        names = os.listdir(sysutil.BACKUP_DIR)
     except OSError:
         return out
     for name in sorted(names, reverse=True):
-        full = os.path.join(BACKUP_DIR, name)
+        full = os.path.join(sysutil.BACKUP_DIR, name)
         if not os.path.isfile(full):
             continue
         if name.startswith("hosts_"):
@@ -494,7 +494,7 @@ def fix_firewall() -> RepairResult:
     res = RepairResult(ok=True)
     _step(res, "导出当前防火墙策略作为备份", run_cmd(
         ["netsh", "advfirewall", "export",
-         os.path.join(BACKUP_DIR, f"firewall_{_stamp()}.wfw")], timeout=90), tolerate=True)
+         os.path.join(sysutil.BACKUP_DIR, f"firewall_{_stamp()}.wfw")], timeout=90), tolerate=True)
     _step(res, "重置防火墙为默认策略",
           run_cmd(["netsh", "advfirewall", "reset"], timeout=90),
           success_hint="防火墙已恢复默认策略")
