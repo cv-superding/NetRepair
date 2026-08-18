@@ -1472,10 +1472,14 @@ class MainWindow(FluentWindow):
         self.resize(1080, 760)
         self.setMinimumSize(940, 640)
 
-        try:
-            self.setMicaEffectEnabled(True)
-        except Exception:  # noqa: BLE001
-            pass
+        # 云母(Mica)背景在部分 Qt 版本 / 系统组合下会让窗口渲染成透明而「看不见」。
+        # 为保证「双击一定能看到窗口」，默认关闭；如需恢复云母效果，
+        # 把下方环境变量设为 1 即可：NETREPAIR_MICA=1
+        if os.environ.get("NETREPAIR_MICA") == "1":
+            try:
+                self.setMicaEffectEnabled(True)
+            except Exception:  # noqa: BLE001
+                pass
 
         self.repairPage = RepairInterface(self)
         self.diagnosePage = DiagnoseInterface(self)

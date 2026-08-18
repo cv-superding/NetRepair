@@ -19,14 +19,16 @@ import struct
 import subprocess
 import sys
 
-# 防止 Qt 在无显示环境（如沙箱 bash）下初始化时崩溃
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 ROOT = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(ROOT, "assets")
 ICO_PATH = os.path.join(ASSETS, "app.ico")
 VERSION_FILE = os.path.join(ASSETS, "version_info.txt")
 EXE_NAME = "网络修复工具"
+
+# 注意：不要在此处设置 QT_QPA_PLATFORM=offscreen。
+# 打包阶段不需要显示器，PyInstaller 仅做静态分析；若设了 offscreen，
+# PySide6 的 PyInstaller hook 在收集 Qt 平台插件时可能被该环境变量干扰，
+# 导致最终 exe 在真实 Windows 上缺少 qwindows 平台插件而静默无法启动。
 
 sys.path.insert(0, ROOT)
 
@@ -146,6 +148,7 @@ def build_exe() -> None:
         f"--workpath={os.path.join(ROOT, 'build')}",
         f"--specpath={os.path.join(ROOT, 'build')}",
         "--hidden-import=PySide6.QtSvg",
+        "--hidden-import=PySide6.QtSvgWidgets",
     ]
     for mod in EXCLUDES:
         args += ["--exclude-module", mod]
