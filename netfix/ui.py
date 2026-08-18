@@ -1584,13 +1584,27 @@ class MainWindow(FluentWindow):
 
 # ==================================================================== 入口
 
+def _diag(msg: str) -> None:
+    """与 main.py 共用同一份探针日志，便于在双击无窗口时定位卡点。"""
+    try:
+        import tempfile
+        path = os.path.join(tempfile.gettempdir(), "NetRepair_diag.log")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(msg + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_app() -> int:
+    _diag("run_app: 进入")
     if hasattr(Qt, "AA_DontCreateNativeWidgetSiblings"):
         QApplication.setAttribute(Qt.AA_DontCreateNativeWidgetSiblings)
 
+    _diag("run_app: 创建 QApplication 前")
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(app_icon())
+    _diag("run_app: QApplication 已创建")
 
     # 全局字体：拉丁文用 Segoe UI，中文回退到更精致的雅黑 / 苹方 / 思源黑体
     app_font = QFont()
@@ -1606,7 +1620,12 @@ def run_app() -> int:
     settings = QSettings("NetRepair", "NetRepair")
     setTheme([Theme.AUTO, Theme.LIGHT, Theme.DARK][_saved_index(settings, "theme", 3)])
     setThemeColor(_ACCENTS[_saved_index(settings, "accent", len(_ACCENTS))][1])
+    _diag("run_app: 主题/主题色已设置")
 
     window = MainWindow()
+    _diag("run_app: MainWindow 已创建")
     window.show()
-    return app.exec()
+    _diag("run_app: window.show() 已调用")
+    rc = app.exec()
+    _diag(f"run_app: app.exec() 返回 rc={rc}")
+    return rc
