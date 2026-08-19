@@ -5,7 +5,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
-![Version](https://img.shields.io/badge/Version-1.1.0-2ea043)
+![Version](https://img.shields.io/badge/Version-1.2.0-2ea043)
 
 **NetRepair** 是一个完全在本地运行的 Windows 网络修复桌面程序。它把常见的 `netsh` / `ipconfig` / PowerShell 网络修复操作封装成可视化的「一键修复」与「逐项修复」，并配套一套双路网络诊断，先定位病因再做最小修复。
 
@@ -21,7 +21,21 @@
 - **10 项网络诊断（双路探测）**：同时走「直连 socket」与「系统代理路径」两条链路，对比定位病因（真断网 / 代理劫持 / DNS 故障 / LSP 损坏），仅对异常项给出自动勾选建议。
 - **日志与备份**：修复前自动备份被修改的配置（Hosts、系统代理、防火墙策略等），日志落盘到 `%ProgramData%`，可追溯、可还原。
 - **Fluent Design 界面**：基于 QFluentWidgets 的 Windows 11 风格，支持 Mica 云母背景、亚克力侧边栏、明暗主题自适应、5 套主题色。
-- **零依赖分发**：PyInstaller 打包为单文件 exe，内嵌 UAC 提权清单，双击即请求管理员权限。
+- **零依赖分发**：PyInstaller 打包为单文件 exe（`NetRepair.exe`，无需安装任何依赖）；需要完整修复能力时右键「以管理员身份运行」即可。
+
+---
+
+## 📦 更新日志
+
+### v1.2.0（2026-08-19）
+- **修复「双击无窗口」**：PyInstaller onefile 对中文 exe 文件名不兼容 + `--uac-admin` 提权清单与 Qt 窗口初始化冲突，两者叠加导致程序静默退出。改为 ASCII 文件名 `NetRepair.exe`、不内嵌提权清单（需要时右键以管理员身份运行）。
+- **启动提速约 3 倍**：程序图标去白底从运行时（纯 Python 逐像素，约 1.2s）移至构建期（PIL+numpy），新增 `gen_icon_b64.py`。
+- **新增快速目录版**：`python build.py --onedir` 生成免解压目录版，启动约 2-3 秒（单文件版约 5-6 秒）。
+- **崩溃不再静默**：新增 SEH 原生崩溃过滤器（弹窗 + 写 `%TEMP%/NetRepair_crash.log`）、Qt 消息钩子、启动逐步诊断日志（`%TEMP%/NetRepair_diag.log`）。
+- 不再排除任何 PySide6 模块（体积换 100% 兼容）。
+
+### v1.1.0（2026-08-06）
+- 首个公开发布版本：14 项修复 + 10 项双路诊断 + 备份还原 + Fluent Design 界面。
 
 ---
 
@@ -66,7 +80,12 @@ python main.py
 
 ### 方式二：直接下载 exe（推荐给普通用户）
 
-前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新的 `NetRepair-v1.1.0.exe`，双击运行即可，**无需安装任何依赖**。需要完整修复能力（修改网络配置）时，请右键 →「以管理员身份运行」。
+前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新版：
+
+- `NetRepair-v1.2.0.exe`（单文件版，方便分享）
+- `NetRepair-v1.2.0-onedir.zip`（目录版，启动更快，约 2-3 秒）
+
+双击运行即可，**无需安装任何依赖**。需要完整修复能力（修改网络配置）时，请右键 →「以管理员身份运行」。
 
 ### 打包为独立 exe（开发者）
 
@@ -103,8 +122,9 @@ python build.py --onedir
 
 ```
 NetRepair/
-├── main.py                 # 程序入口：管理员提权 + 启动 GUI
-├── build.py                # 打包脚本：生成图标 / 版本信息 / 调用 PyInstaller
+├── main.py                 # 程序入口：启动 GUI + 崩溃诊断（SEH/日志），不自动提权
+├── build.py                # 打包脚本：生成图标 / 版本信息 / 调用 PyInstaller（单文件或 --onedir）
+├── gen_icon_b64.py         # 构建期图标预处理：去白底 → 内嵌透明 PNG（消除运行时像素循环，加速启动）
 ├── requirements.txt        # 运行与打包依赖
 ├── LICENSE                 # GPLv3 全文
 ├── assets/                 # 图标源图与构建产物（app-icon-source.png 入仓，*.ico/*.txt 为生成物）
@@ -130,8 +150,8 @@ NetRepair/
 | **界面层 `ui.py`** | 基于 `FluentWindow` + QFluentWidgets 组件，5 个 `addSubInterface` 子页面；主题色与明暗主题全链路自适应。 |
 | **业务层 `engine.py` / `diagnose.py`** | 纯函数式封装系统命令，不依赖 GUI；修复前自动备份、执行后可还原。 |
 | **支撑层 `sysutil.py`** | 进程提权（`runas` / UAC）、命令执行与超时、日志（`%ProgramData%` 落盘）、备份目录管理。 |
-| **资源层 `icons.py`** | 程序图标以 base64 内嵌，解决单文件 exe 找不到外部资源的问题；JPEG 无透明通道，运行时按亮度去白底。 |
-| **打包 `build.py`** | 由 MJ 源图生成多尺寸 ICO 与版本信息，PyInstaller 单文件 + `--uac-admin`，依赖以 `--exclude-module` 精简体积。 |
+| **资源层 `icons.py`** | 程序图标以 base64 内嵌，解决单文件 exe 找不到外部资源的问题；透明通道由 `gen_icon_b64.py` 在**构建期**用 PIL+numpy 处理好，运行时只解码缩放（启动提速关键，约省 1.2s）。 |
+| **打包 `build.py`** | 由 MJ 源图生成多尺寸 ICO 与版本信息；支持单文件（`python build.py`）与快速目录版（`python build.py --onedir`）；不内嵌 UAC 清单、不排除任何模块（体积换 100% 兼容）。 |
 
 **设计理念**：诊断与修复解耦——诊断只负责「定位病因并给出最小修复建议」，修复只负责「执行勾选项」，二者通过建议列表联动，避免「无差别全量修复」带来的不必要风险。
 
@@ -173,7 +193,7 @@ A：多为运营商线路或路由器/光猫故障，软件层面已尽力。请
 A：不会。所有操作仅作用于系统网络配置，且全部在本地执行；谨慎类操作执行前会自动备份，可随时还原。
 
 **Q：杀软误报怎么办？**
-A：单文件 exe 因内嵌 Python 运行时与提权清单，可能被部分杀软误报。源码完全公开，可自行 `python build.py` 重建校验；如确认误报，欢迎邮件反馈以便处理。
+A：单文件 exe 因内嵌 Python 运行时可能被部分杀软误报。源码完全公开，可自行 `python build.py` 重建校验；如确认误报，欢迎邮件反馈以便处理。
 
 ---
 
