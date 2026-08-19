@@ -12,6 +12,9 @@ assets/version_info.txt
 assets/icon_preview_whitekey.png  # gen_icon_b64.py 构建期生成
 build_*.log                      # 打包日志
 pip_*.log
+release_body.json               # 发布用临时文件
+release_resp.json
+asset*.json
 
 # ===== 虚拟环境 =====
 venv/
