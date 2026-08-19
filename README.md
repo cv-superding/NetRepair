@@ -45,9 +45,9 @@
 |---|---|---|
 | ![关于](shots/fluent-about.png) | ![运行日志](shots/fluent-repair-log.png) | ![诊断](shots/fluent-diagnose.png) |
 
-| 备份页 | 主题色切换 |
+| 备份页 | 首页 |
 |---|---|
-| ![备份](shots/fluent-backup.png) | ![主题色](shots/fluent-accent-blue.png) |
+| ![备份](shots/fluent-backup.png) | ![首页](shots/fluent-index.png) |
 
 ---
 
