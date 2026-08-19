@@ -66,7 +66,7 @@ python main.py
 
 ### 方式二：直接下载 exe（推荐给普通用户）
 
-前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新的 `NetRepair-v1.1.0.exe`，双击运行并同意 UAC 提权即可，**无需安装任何依赖**。
+前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新的 `NetRepair-v1.1.0.exe`，双击运行即可，**无需安装任何依赖**。需要完整修复能力（修改网络配置）时，请右键 →「以管理员身份运行」。
 
 ### 打包为独立 exe（开发者）
 
@@ -74,11 +74,14 @@ python main.py
 # 安装打包依赖
 pip install pyinstaller pillow
 
-# 一键打包（生成 dist/网络修复工具.exe）
+# 一键打包（生成 dist/NetRepair.exe 单文件版）
 python build.py
+
+# 或打包快速启动的目录版（免解压，启动 ~2s；生成 dist/NetRepair/ 文件夹）
+python build.py --onedir
 ```
 
-打包产物为单文件 exe，内嵌 UAC `requireAdministrator` 清单与版本信息。
+单文件版用 ASCII 文件名 `NetRepair.exe`（PyInstaller onefile 在本机对中文文件名有兼容问题，已实测确认），窗口标题与界面仍为中文「网络修复工具」。不内嵌 UAC 清单，提权由界面提示引导。
 
 ---
 

@@ -23,7 +23,11 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(ROOT, "assets")
 ICO_PATH = os.path.join(ASSETS, "app.ico")
 VERSION_FILE = os.path.join(ASSETS, "version_info.txt")
-EXE_NAME = "网络修复工具"
+# 必须用 ASCII 文件名！实测：PyInstaller onefile 在本机（Win11 26200）对中文
+# 文件名有 bug——程序能启动到窗口构建阶段，然后静默退出（无任何报错记录）。
+# 同一份二进制：NetRepair-win.exe 能开，改名「网络修复工具-改名测试.exe」就死。
+# 窗口标题/关于页仍显示中文「网络修复工具」，仅磁盘文件名用英文。
+EXE_NAME = "NetRepair"
 
 # 注意：不要在此处设置 QT_QPA_PLATFORM=offscreen。
 # 打包阶段不需要显示器，PyInstaller 仅做静态分析；若设了 offscreen，
@@ -114,31 +118,24 @@ def build_version_file() -> str:
 
 # ------------------------------------------------------------------ 打包
 
-EXCLUDES = [
-    "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets", "PySide6.QtQuick3D",
-    "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtOpenGL",
-    "PySide6.QtOpenGLWidgets", "PySide6.QtSql", "PySide6.QtTest", "PySide6.QtDesigner",
-    "PySide6.QtHelp", "PySide6.QtUiTools", "PySide6.QtPrintSupport", "PySide6.QtPdf",
-    "PySide6.QtPdfWidgets", "PySide6.QtWebSockets", "PySide6.QtWebChannel",
-    "PySide6.QtPositioning", "PySide6.QtSerialPort", "PySide6.QtSpatialAudio",
-    "PySide6.QtTextToSpeech", "PySide6.QtStateMachine", "PySide6.QtCharts",
-    "PySide6.QtDataVisualization", "PySide6.QtBluetooth", "PySide6.QtNfc",
-    "PySide6.QtRemoteObjects", "PySide6.QtScxml", "PySide6.QtSensors",
-    "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtHttpServer",
-    "tkinter", "unittest", "pydoc", "doctest", "test", "email", "http", "xmlrpc",
-    "pdb", "sqlite3", "numpy", "PIL", "setuptools", "pkg_resources",
-]
+# 不再排除任何模块：
+# 1) 排查已确认「双击无窗口」的元凶是中文 exe 文件名（PyInstaller onefile bug），
+#    与 excludes 无关；
+# 2) 排除 PySide6 模块虽有体积收益（67MB→49MB），但为 100% 兼容不再冒任何风险；
+# 3) 启动慢的问题由 onedir 目录版解决（build.py --onedir），单文件版保留给分享用。
+EXCLUDES: list[str] = []
 
 
 def build_exe() -> None:
     ico = build_ico()
     ver = build_version_file()
 
+    mode = "--onedir" if "--onedir" in sys.argv else "--onefile"
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
         # "--clean",  # 已手动清理 build/，避免沙箱删除拦截
-        "--onefile",
+        mode,
         "--windowed",
         # 注意：不要加 --uac-admin！实测（Win11 26200）管理员清单 + windowed 下
         # PySide6 在 Qt 窗口初始化时原生崩溃（0xC0000005），表现为双击无窗口。
