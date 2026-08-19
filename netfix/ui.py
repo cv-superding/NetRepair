@@ -1626,6 +1626,13 @@ def run_app() -> int:
     _diag("run_app: MainWindow 已创建")
     window.show()
     _diag("run_app: window.show() 已调用")
+
+    # 诊断模式：设 NETREPAIR_DIAG=1 时自动退出事件循环，便于一键诊断脚本抓取日志
+    if os.environ.get("NETREPAIR_DIAG") == "1":
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(1500, app.quit)
+        _diag("run_app: 诊断模式，1.5s 后自动退出")
+
     rc = app.exec()
     _diag(f"run_app: app.exec() 返回 rc={rc}")
     return rc

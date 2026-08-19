@@ -9,6 +9,7 @@ build/
 dist/
 assets/app.ico
 assets/version_info.txt
+assets/icon_preview_whitekey.png  # gen_icon_b64.py 构建期生成
 
 # ===== 虚拟环境 =====
 venv/
