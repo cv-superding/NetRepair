@@ -140,7 +140,9 @@ def build_exe() -> None:
         # "--clean",  # 已手动清理 build/，避免沙箱删除拦截
         "--onefile",
         "--windowed",
-        "--uac-admin",
+        # 注意：不要加 --uac-admin！实测（Win11 26200）管理员清单 + windowed 下
+        # PySide6 在 Qt 窗口初始化时原生崩溃（0xC0000005），表现为双击无窗口。
+        # 提权改由程序内 is_admin 判断 + 界面提示，用户可右键以管理员身份运行。
         f"--name={EXE_NAME}",
         f"--icon={ico}",
         f"--version-file={ver}",
