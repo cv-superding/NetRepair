@@ -41,9 +41,9 @@
 
 ## 🖼️ 软件截图
 
-| 关于页 | 修复页 | 诊断页 |
+| 关于页 | 运行日志 | 诊断页 |
 |---|---|---|
-| ![关于](shots/fluent-about.png) | ![修复](shots/fluent-repair.png) | ![诊断](shots/fluent-diagnose.png) |
+| ![关于](shots/fluent-about.png) | ![运行日志](shots/fluent-repair-log.png) | ![诊断](shots/fluent-diagnose.png) |
 
 | 备份页 | 主题色切换 |
 |---|---|
