@@ -26,7 +26,7 @@ import winreg
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import sysutil
+from . import proxydns, sysutil
 from .sysutil import (
     LOGGER,
     CmdResult,
@@ -558,6 +558,146 @@ def fix_tcp_tuning() -> RepairResult:
     return _finish(res, "TCP 参数已优化", "TCP 参数优化部分失败")
 
 
+def fix_dns_public() -> RepairResult:
+    """把活动网卡的 DNS 改为公共 DNS。
+
+    针对「运营商 / 校园网下发的 DNS 服务器不可用」：症状是能 ping 通外网、
+    但任何域名都解析不出来，代理客户端会表现为所有节点 Timeout。
+    """
+    res = RepairResult(ok=True)
+    adapters = proxydns.list_adapter_dns()
+    if not adapters:
+        res.steps.append(StepResult("查找活动网卡", False, "未找到配置了 DNS 的网卡"))
+        return _finish(res, "", "未找到可修复的网卡")
+
+    old = {a.name: list(a.servers) for a in adapters}
+    bak = backup_json(old, "dns-servers")
+    res.steps.append(StepResult("备份原 DNS 配置", bak is not None,
+                                f"备份至 {bak}" if bak else "备份失败，但不影响修复"))
+
+    targets = "','".join(proxydns.PUBLIC_DNS)
+    for ad in adapters:
+        script = (
+            f"Set-DnsClientServerAddress -InterfaceIndex {ad.index} "
+            f"-ServerAddresses ('{targets}');"
+            "if($?){'已设置'}else{'设置失败'}"
+        )
+        _step(res, f"网卡「{ad.name}」DNS → {' / '.join(proxydns.PUBLIC_DNS)}",
+              run_ps(script, timeout=60), tolerate=True)
+
+    _step(res, "刷新 DNS 缓存", run_cmd(["ipconfig", "/flushdns"], timeout=45), tolerate=True)
+
+    # 改完立刻复测，把「设了但还是不通」这种情况暴露出来，而不是只报成功
+    probes = proxydns.probe_all(list(proxydns.PUBLIC_DNS), timeout=8)
+    dead = [x.server for x in probes if not x.ok]
+    if dead:
+        res.steps.append(StepResult("复测公共 DNS", False,
+                                    f"{'、'.join(dead)} 仍不可达，可能是网络本身不通"))
+    else:
+        res.steps.append(StepResult("复测公共 DNS", True,
+                                    "、".join(f"{x.server}→{x.resolved}" for x in probes)))
+    return _finish(res, "DNS 已改为公共 DNS", "DNS 修改部分失败")
+
+
+def fix_proxy_client_dns() -> RepairResult:
+    """修复 Clash / Verge 一类客户端的 DNS 配置。
+
+    两个典型病灶：
+    - DNS 覆写关闭，而订阅里又没有 dns 段 → 完全依赖系统 DNS；
+    - 引导 DNS 写成 ``system`` 或已失效的地址 → DoH 域名解析不了，引导死循环。
+    """
+    res = RepairResult(ok=True)
+    clients = proxydns.find_proxy_clients()
+    if not clients:
+        res.steps.append(StepResult("查找代理客户端", False,
+                                    "未检测到 Clash Verge / Mihomo Party 的配置目录"))
+        return _finish(res, "", "未找到代理客户端")
+
+    res.steps.append(StepResult("查找代理客户端", True,
+                                "、".join(c.name for c in clients)))
+
+    for client in clients:
+        issues = proxydns.diagnose_client(client)
+        if not issues:
+            res.steps.append(StepResult(f"检查「{client.name}」", True, "配置未发现问题"))
+            continue
+        res.steps.append(StepResult(f"检查「{client.name}」", True, "；".join(issues)))
+
+        for name in ("verge.yaml", "dns_config.yaml"):
+            src = os.path.join(client.base, name)
+            if os.path.isfile(src):
+                bak = backup_file(src, f"{client.name.split('.')[0]}-{name.replace('.', '_')}")
+                res.steps.append(StepResult(f"备份 {name}", bak is not None,
+                                            f"备份至 {bak}" if bak else "备份失败"))
+
+        ok, steps = proxydns.patch_client_config(client)
+        for text in steps:
+            res.steps.append(StepResult(text, ok))
+        if not ok:
+            LOGGER.error(f"修复 {client.name} 配置失败")
+
+    res.steps.append(StepResult("提示", True,
+                                "改动需在客户端里「重启内核」后生效"))
+    return _finish(res, "代理客户端 DNS 配置已修复（请重启内核）", "代理客户端配置修复失败")
+
+
+def fix_route_metric() -> RepairResult:
+    """消除多条同跃点的默认路由。
+
+    有线 + 手机 USB 共享同时在线时，两条默认路由常常同为 metric 25，
+    Windows 可以走任意一条 —— 长连接会在两条出口间摇摆，表现为「时好时坏」。
+    这里保留跃点最小的第一条，把其余的抬高，让出口确定。
+    """
+    res = RepairResult(ok=True)
+    tied = proxydns.ambiguous_routes()
+    if len(tied) <= 1:
+        res.steps.append(StepResult("检查默认路由", True, "未发现同跃点的多条默认路由"))
+        return _finish(res, "默认路由无需调整", "")
+
+    desc = "、".join(f"{r.gateway}(metric={r.metric})" for r in tied)
+    res.steps.append(StepResult("发现出口冲突", True, f"{len(tied)} 条同跃点默认路由：{desc}"))
+
+    keep = tied[0]
+    for route in tied[1:]:
+        idx = _interface_index(route.interface)
+        if not idx:
+            res.steps.append(StepResult(f"调整出口 {route.gateway}", False,
+                                        f"未能把接口地址 {route.interface} 映射到网卡索引"))
+            continue
+        new_metric = keep.metric + 30
+        script = (
+            f"Set-NetIPInterface -InterfaceIndex {idx} -InterfaceMetric {new_metric};"
+            "if($?){'已调整'}else{'调整失败'}"
+        )
+        _step(res, f"网卡索引 {idx} 跃点数 → {new_metric}",
+              run_ps(script, timeout=60), tolerate=True)
+
+    left = proxydns.ambiguous_routes()
+    if len(left) <= 1:
+        res.steps.append(StepResult("复查默认路由", True, "出口已唯一"))
+    else:
+        res.steps.append(StepResult("复查默认路由", False,
+                                    f"仍有 {len(left)} 条同跃点默认路由"))
+    return _finish(res, "默认路由优先级已修正", "默认路由调整部分失败")
+
+
+def _interface_index(interface_ip: str) -> int | None:
+    """把默认路由里的接口地址映射回网卡索引（Set-NetIPInterface 需要索引）。"""
+    script = (
+        "Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { "
+        "'{0}|{1}' -f $_.InterfaceIndex, $_.IPAddress }"
+    )
+    out = run_ps(script, timeout=60).output or ""
+    for line in out.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) == 2 and parts[1].strip() == interface_ip:
+            try:
+                return int(parts[0])
+            except ValueError:
+                return None
+    return None
+
+
 # ==================================================================== 修复项注册表
 
 def build_items() -> list[RepairItem]:
@@ -586,6 +726,13 @@ def build_items() -> list[RepairItem]:
             note="修改前会自动备份，可在「备份还原」页恢复"),
 
         RepairItem(
+            key="clash_dns", name="修复代理客户端 DNS", risk=RISK_MEDIUM,
+            desc="检查 Clash Verge / Mihomo Party 的 DNS 配置：DNS 覆写是否关闭、"
+                 "引导 DNS 是否指向已失效的服务器，并自动修正",
+            action=fix_proxy_client_dns, default_checked=False,
+            note="改动需在客户端里「重启内核」后生效；修改前自动备份配置文件"),
+
+        RepairItem(
             key="gateway", name="修复默认网关", risk=RISK_MEDIUM,
             desc="释放并重新向路由器申请 IP 地址与默认网关，并测试网关连通性",
             action=fix_gateway, default_checked=True,
@@ -596,6 +743,13 @@ def build_items() -> list[RepairItem]:
             desc="清除被篡改的手动 DNS 地址，恢复由路由器 / 运营商自动分配",
             action=fix_dns_server_auto, default_checked=True,
             note="若你手动设置过 114/223 等公共 DNS，将被清除"),
+
+        RepairItem(
+            key="dns_public", name="DNS 改为公共 DNS", risk=RISK_MEDIUM,
+            desc="把网卡 DNS 换成 223.5.5.5 / 119.29.29.29，解决运营商或校园网 DNS 不可用"
+                 "导致「能 ping 通但所有域名都解析失败」",
+            action=fix_dns_public, default_checked=False,
+            note="改为静态 DNS 后，校内网/内网域名可能无法解析，需要时改回自动获取"),
 
         RepairItem(
             key="arp", name="清理 ARP / NetBIOS 缓存", risk=RISK_SAFE,
@@ -635,6 +789,13 @@ def build_items() -> list[RepairItem]:
             desc="清除 VPN / 虚拟网卡遗留的持久化静态路由，修复部分网段无法访问",
             action=fix_route_table, default_checked=False,
             note="会短暂中断所有网络连接"),
+
+        RepairItem(
+            key="route_metric", name="修正多网卡出口优先级", risk=RISK_HIGH,
+            desc="有线与手机 USB 共享同时在线时，两条默认路由常同为 metric 25，"
+                 "出口在两条链路间摇摆，表现为「时好时坏」；此项抬高备用网卡的跃点数",
+            action=fix_route_metric, default_checked=False,
+            note="会调整网卡跃点数，可能短暂影响正在进行的下载/上传"),
 
         RepairItem(
             key="ie", name="修复 Internet 选项", risk=RISK_SAFE,

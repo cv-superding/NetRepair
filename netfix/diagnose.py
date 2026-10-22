@@ -23,6 +23,7 @@ import socket
 import winreg
 from dataclasses import dataclass, field
 
+from . import proxydns
 from .sysutil import LOGGER, hosts_path, run_cmd, run_ps
 
 LEVEL_OK = "ok"
@@ -374,6 +375,94 @@ def check_services() -> CheckResult:
 
 # ------------------------------------------------------------------ 编排
 
+def check_dns_servers() -> CheckResult:
+    """逐台验证网卡上配置的 DNS 服务器是否真的可用。
+
+    与 `check_dns`（只测「能不能解析」）互补：这里定位**是哪一台**不响应。
+    运营商/校园网下发一台坏 DNS 时，Windows 会先问它、等 2 秒超时再换下一台，
+    表现为「网页打开慢」；代理客户端则可能直接全节点 Timeout。
+    """
+    adapters = proxydns.list_adapter_dns()
+    servers: list[str] = []
+    for ad in adapters:
+        for srv in ad.servers:
+            if srv not in servers:
+                servers.append(srv)
+
+    if not servers:
+        return CheckResult("dns_servers", "DNS 服务器可用性", LEVEL_WARN,
+                           "未能从网卡读取到 DNS 配置", ["dns_server"])
+
+    results = proxydns.probe_all(servers, timeout=8)
+    dead = [r for r in results if not r.ok]
+    alive = [r for r in results if r.ok]
+
+    if not dead:
+        return CheckResult(
+            "dns_servers", "DNS 服务器可用性", LEVEL_OK,
+            f"{len(results)} 台全部可用：" + "、".join(f"{r.server}" for r in results))
+
+    dead_text = "、".join(f"{r.server}（{r.detail}）" for r in dead)
+    if not alive:
+        return CheckResult(
+            "dns_servers", "DNS 服务器可用性", LEVEL_ERROR,
+            f"网卡上配置的 {len(results)} 台 DNS 全部无响应：{dead_text}。"
+            "这会导致所有域名解析失败，代理客户端会表现为节点全部超时",
+            ["dns_public", "dns_cache", "dns_server"])
+    return CheckResult(
+        "dns_servers", "DNS 服务器可用性", LEVEL_WARN,
+        f"{len(dead)} 台不可用：{dead_text}；可用：{'、'.join(r.server for r in alive)}。"
+        "每次解析都会先等坏的那台超时",
+        ["dns_public"])
+
+
+def check_multi_route() -> CheckResult:
+    """检查是否存在「跃点相同」的多条默认路由。
+
+    有线 + 手机 USB 共享同时在线时，两条默认路由常同为 metric 25。
+    Windows 会任选一条，长连接在两条出口间摇摆 —— 症状是「时好时坏」，
+    而且极难复现，因为每次连接的出口都可能不同。
+    """
+    tied = proxydns.ambiguous_routes()
+    if len(tied) <= 1:
+        routes = proxydns.default_routes()
+        detail = ("当前默认路由：" + "、".join(f"{r.gateway}(metric={r.metric})" for r in routes)
+                  ) if routes else "未读取到默认路由"
+        return CheckResult("multi_route", "多网卡出口", LEVEL_OK, detail)
+
+    desc = "、".join(f"{r.gateway}(metric={r.metric})" for r in tied)
+    return CheckResult(
+        "multi_route", "多网卡出口", LEVEL_WARN,
+        f"{len(tied)} 条默认路由跃点数相同：{desc}。出口在它们之间不确定，"
+        "长连接可能中途换路，表现为网络时好时坏",
+        ["route_metric"])
+
+
+def check_proxy_client_dns() -> CheckResult:
+    """检查 Clash Verge / Mihomo Party 的 DNS 配置是否会让解析失效。
+
+    两个真实踩过的坑：
+    1. DNS 覆写关闭 + 订阅里没有 dns 段 → 完全依赖系统 DNS；
+    2. 引导 DNS 写成 `system`（= 系统 DNS）或 8.8.8.8（国内不通）→ DoH 域名解析不了。
+    """
+    clients = proxydns.find_proxy_clients()
+    if not clients:
+        return CheckResult("proxy_client", "代理客户端 DNS", LEVEL_OK,
+                           "未检测到 Clash Verge / Mihomo Party")
+
+    problems = [(c, proxydns.diagnose_client(c)) for c in clients]
+    bad = [(c, issues) for c, issues in problems if issues]
+    if not bad:
+        names = "、".join(c.name for c in clients)
+        return CheckResult("proxy_client", "代理客户端 DNS", LEVEL_OK,
+                           f"已检查：{names}，配置未见问题")
+
+    detail = "；".join(f"{c.name}：{'、'.join(issues)}" for c, issues in bad)
+    return CheckResult("proxy_client", "代理客户端 DNS", LEVEL_WARN,
+                       detail + "。这类配置会让节点域名解析失败，界面上表现为全部超时",
+                       ["clash_dns"])
+
+
 CHECKS = [
     ("网络适配器", check_adapter),
     ("IP 地址配置", check_ip),
@@ -382,6 +471,9 @@ CHECKS = [
     ("外网直连", check_direct),
     ("网页访问", check_via_proxy),
     ("代理设置", check_proxy_settings),
+    ("DNS 服务器可用性", check_dns_servers),
+    ("多网卡出口", check_multi_route),
+    ("代理客户端 DNS", check_proxy_client_dns),
     ("Hosts 文件", check_hosts),
     ("Winsock / LSP", check_winsock),
     ("网络系统服务", check_services),
