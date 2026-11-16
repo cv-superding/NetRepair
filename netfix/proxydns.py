@@ -47,6 +47,7 @@ class DnsServer:
     ok: bool = False
     resolved: str = ""
     detail: str = ""
+    responded: bool = False   # 服务器是否响应；与「能否解析域名」分开判定
 
 
 @dataclass
@@ -127,6 +128,7 @@ def probe_dns(server: str, domain: str = PROBE_DOMAIN, timeout: int = 8) -> DnsS
 
     if ip:
         result.ok = True
+        result.responded = True
         result.resolved = ip
         note = "（首次请求超时后重试成功）" if ("timed out" in low or "超时" in text) else ""
         result.detail = f"解析正常（{domain} → {ip}）{note}"
@@ -136,10 +138,11 @@ def probe_dns(server: str, domain: str = PROBE_DOMAIN, timeout: int = 8) -> DnsS
         result.detail = "无响应（超时）"
         return result
     if "can't find" in low or "找不到" in text or "no answer" in low:
-        result.detail = "有响应但查不到该域名"
+        result.responded = True
+        result.detail = "有响应，但查不到该域名"
         return result
 
-    result.detail = "未取得解析结果"
+    result.detail = "未取得解析结果（无法确认服务器是否响应）"
     return result
 
 
@@ -415,7 +418,8 @@ def snapshot() -> dict:
             {"index": a.index, "name": a.name, "servers": a.servers} for a in adapters
         ],
         "dns": [
-            {"server": d.server, "ok": d.ok, "resolved": d.resolved, "detail": d.detail}
+            {"server": d.server, "ok": d.ok, "resolved": d.resolved,
+             "detail": d.detail, "responded": d.responded}
             for d in probe_all(servers)
         ],
         "routes": [

@@ -268,6 +268,28 @@ def _step(res: RepairResult, title: str, cmd: CmdResult,
                  "OK" if ok else "ERROR")
 
 
+def _netsh_reset_result(cmd: CmdResult, done_hint: str) -> CmdResult:
+    """修正 netsh reset 类命令的判定：部分 Windows 在逐段打印「完成!」后仍返回非 0。
+
+    _step 只看退出码，会把这种「实际已重置完成」误报为失败，且 detail 恰好是
+    「正在重置 XXX，完成!」这行。这里以输出为准：有明确完成标记且无失败行时
+    按成功处理；确有失败行时把失败行提到首行，让日志显示真正的错误原因。
+    """
+    if cmd.ok or cmd.timeout:
+        return cmd
+    out = cmd.output or ""
+    low = out.lower()
+    done = ("完成!" in out or "完成！" in out or " done" in low or "completed" in low)
+    err = next((line.strip() for line in out.splitlines()
+                if ("失败" in line or "error" in line.lower()
+                    or "failed" in line.lower() or "denied" in line.lower())), "")
+    if done and not err:
+        return CmdResult(cmd.cmd, 0, done_hint)
+    if err:
+        return CmdResult(cmd.cmd, cmd.code or 1, f"{err}（返回码 {cmd.code}）")
+    return cmd
+
+
 def _finish(res: RepairResult, ok_msg: str, fail_msg: str) -> RepairResult:
     failed = [s for s in res.steps if not s.ok]
     res.ok = not failed
@@ -323,8 +345,9 @@ def fix_winsock() -> RepairResult:
 def fix_tcpip() -> RepairResult:
     """重置 TCP/IP 协议栈。"""
     res = RepairResult(ok=True, need_reboot=True)
-    _step(res, "重置 IP 协议栈", run_cmd(["netsh", "int", "ip", "reset"], timeout=120),
-          success_hint="IP 协议栈已重置")
+    _step(res, "重置 IP 协议栈",
+          _netsh_reset_result(run_cmd(["netsh", "int", "ip", "reset"], timeout=120),
+                              "IP 协议栈已重置"))
     _step(res, "重置 IPv4 配置", run_cmd(["netsh", "int", "ipv4", "reset"], timeout=120),
           tolerate=True)
     _step(res, "重置 IPv6 配置", run_cmd(["netsh", "int", "ipv6", "reset"], timeout=120),
@@ -341,8 +364,9 @@ def fix_gateway() -> RepairResult:
     """修复默认网关：释放并重新获取 IP 与网关。"""
     res = RepairResult(ok=True)
     _step(res, "释放当前 IP 地址", run_cmd(["ipconfig", "/release"], timeout=90), tolerate=True)
-    _step(res, "重新获取 IP 与默认网关", run_cmd(["ipconfig", "/renew"], timeout=120),
-          success_hint="已向 DHCP 服务器重新申请地址")
+    renew = run_cmd(["ipconfig", "/renew"], timeout=120)
+    _step(res, "重新获取 IP 与默认网关", renew,
+          success_hint="已执行 DHCP 重新申请（地址与网关以校验结果为准）")
 
     gw = run_ps(
         "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | "
@@ -353,12 +377,24 @@ def fix_gateway() -> RepairResult:
         LOGGER.ok(f"校验默认网关 -> {got}")
         ping = run_cmd(["ping", "-n", "2", "-w", "1200", got], timeout=30)
         reachable = ping.ok and ("TTL=" in ping.output or "ttl=" in ping.output)
-        res.steps.append(StepResult("测试网关连通性", reachable,
-                                    "网关可达" if reachable else "网关暂不可达，请检查路由器或网线"))
+        if reachable:
+            detail = "网关可达"
+        elif "timed out" in ping.output.lower() or "超时" in ping.output:
+            detail = (f"网关 {got} 未回应 ping（请求超时，返回码 {ping.code}）："
+                      "可能是网关禁 ping、本机 IPv4 未真正连通或链路异常；"
+                      "请结合网页访问 / DNS 诊断判断，不能只据此判定路由器故障")
+        else:
+            detail = (f"网关 {got} 的 ping 检测失败（返回码 {ping.code}）："
+                      f"{ping.first_line() or '无输出'}")
+        res.steps.append(StepResult("测试网关连通性", reachable, detail))
     else:
-        res.steps.append(StepResult("校验默认网关", False,
-                                    "未检测到默认网关，请确认网线/无线已连接"))
-        LOGGER.error("校验默认网关 -> 未检测到默认网关")
+        apipa = "169.254." in (renew.output or "")
+        detail = ("未检测到默认网关：DHCP 未下发网关" +
+                  ("，网卡已退回 169.254 自动专用地址" if apipa else "，网卡可能未取得有效 IPv4 地址") +
+                  "。请检查路由器/热点的 DHCP 服务与网卡连接；"
+                  "若换网络仍如此，多为 DHCP 客户端服务或 TCP/IP 协议栈异常，建议继续修复网络服务与协议栈")
+        res.steps.append(StepResult("校验默认网关", False, detail))
+        LOGGER.error(f"校验默认网关 -> {detail}")
     return _finish(res, "默认网关已修复", "默认网关修复未完全成功")
 
 
@@ -589,10 +625,17 @@ def fix_dns_public() -> RepairResult:
 
     # 改完立刻复测，把「设了但还是不通」这种情况暴露出来，而不是只报成功
     probes = proxydns.probe_all(list(proxydns.PUBLIC_DNS), timeout=8)
-    dead = [x.server for x in probes if not x.ok]
-    if dead:
+    bad = [x for x in probes if not x.ok]
+    if bad:
+        parts = []
+        unreachable = [x.server for x in bad if not x.responded]
+        no_answer = [x.server for x in bad if x.responded]
+        if unreachable:
+            parts.append(f"{'、'.join(unreachable)} 无响应")
+        if no_answer:
+            parts.append(f"{'、'.join(no_answer)} 有响应但解析失败")
         res.steps.append(StepResult("复测公共 DNS", False,
-                                    f"{'、'.join(dead)} 仍不可达，可能是网络本身不通"))
+                                    "；".join(parts) + "，请结合网络连通性与 DNS 配置判断"))
     else:
         res.steps.append(StepResult("复测公共 DNS", True,
                                     "、".join(f"{x.server}→{x.resolved}" for x in probes)))

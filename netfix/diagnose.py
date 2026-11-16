@@ -394,25 +394,36 @@ def check_dns_servers() -> CheckResult:
                            "未能从网卡读取到 DNS 配置", ["dns_server"])
 
     results = proxydns.probe_all(servers, timeout=8)
-    dead = [r for r in results if not r.ok]
     alive = [r for r in results if r.ok]
+    unreachable = [r for r in results if not r.ok and not r.responded]
+    no_answer = [r for r in results if not r.ok and r.responded]
 
-    if not dead:
+    if not (unreachable or no_answer):
         return CheckResult(
             "dns_servers", "DNS 服务器可用性", LEVEL_OK,
-            f"{len(results)} 台全部可用：" + "、".join(f"{r.server}" for r in results))
+            f"{len(results)} 台全部可用：" + "、".join(r.server for r in results))
 
-    dead_text = "、".join(f"{r.server}（{r.detail}）" for r in dead)
+    parts: list[str] = []
+    if unreachable:
+        parts.append(f"{len(unreachable)} 台无响应：" +
+                     "、".join(f"{r.server}（{r.detail}）" for r in unreachable))
+    if no_answer:
+        parts.append(f"{len(no_answer)} 台有响应但无法解析：" +
+                     "、".join(f"{r.server}（{r.detail}）" for r in no_answer))
+    text = "；".join(parts)
+
     if not alive:
-        return CheckResult(
-            "dns_servers", "DNS 服务器可用性", LEVEL_ERROR,
-            f"网卡上配置的 {len(results)} 台 DNS 全部无响应：{dead_text}。"
-            "这会导致所有域名解析失败，代理客户端会表现为节点全部超时",
-            ["dns_public", "dns_cache", "dns_server"])
+        if no_answer and not unreachable:
+            tail = "。服务器并非宕机，而是解析服务异常/被劫持；这同样会导致所有域名解析失败"
+        elif unreachable and not no_answer:
+            tail = "。这会导致所有域名解析失败，代理客户端会表现为节点全部超时"
+        else:
+            tail = "。无响应的需更换；有响应却解析失败的多为配置错误或被劫持"
+        return CheckResult("dns_servers", "DNS 服务器可用性", LEVEL_ERROR,
+                           text + tail, ["dns_public", "dns_cache", "dns_server"])
     return CheckResult(
         "dns_servers", "DNS 服务器可用性", LEVEL_WARN,
-        f"{len(dead)} 台不可用：{dead_text}；可用：{'、'.join(r.server for r in alive)}。"
-        "每次解析都会先等坏的那台超时",
+        text + f"；可用：{'、'.join(r.server for r in alive)}。每次解析都会先等坏的那台超时",
         ["dns_public"])
 
 
