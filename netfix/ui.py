@@ -79,6 +79,7 @@ from . import (
     APP_VERSION,
     diagnose,
     engine,
+    updatecheck,
 )
 from .icons import app_icon, make_pixmap
 from . import sysutil
@@ -299,6 +300,19 @@ class DiagnoseWorker(QThread):
             LOGGER.error(f"诊断异常：{exc}")
             results = []
         self.resultReady.emit(results)
+
+
+class UpdateCheckWorker(QThread):
+    """后台检查 GitHub 最新 Release，结果通过信号回传 GUI 线程。"""
+
+    resultReady = Signal(object)
+
+    def run(self) -> None:  # noqa: D102
+        try:
+            self.resultReady.emit(updatecheck.fetch_latest_release())
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(f"检查更新异常：{exc}")
+            self.resultReady.emit(None)
 
 
 class LogBridge(QObject):
@@ -1137,6 +1151,16 @@ class AboutInterface(BaseInterface):
         copy.setTextColor("#8A8F99", "#7C838F")
         _style_text(copy, letter=0.2)
         info.addWidget(copy)
+        # 检查更新按钮：与版本信息同处应用信息卡片，手动触发
+        check_row = QHBoxLayout()
+        check_row.setSpacing(10)
+        check_btn = TransparentPushButton(
+            getattr(FIF, "UPDATE", FIF.INFO), "检查更新", card)
+        check_btn.setFixedHeight(30)
+        check_btn.clicked.connect(self._on_check_update_clicked)
+        check_row.addWidget(check_btn)
+        check_row.addStretch(1)
+        info.addLayout(check_row)
         lay.addLayout(info, 1)
         self.vbox.addWidget(card)
 
@@ -1359,6 +1383,12 @@ class AboutInterface(BaseInterface):
         wl.addWidget(warn)
         self.vbox.addWidget(warn_card)
 
+    def _on_check_update_clicked(self) -> None:
+        """手动检查更新：委托主窗口执行，以便复用同一套提示逻辑。"""
+        window = self.window()
+        if window and hasattr(window, "check_for_updates"):
+            window.check_for_updates(manual=True)
+
     def _copy_email(self) -> None:
         QApplication.clipboard().setText(APP_EMAIL)
         InfoBar.success(title="已复制", content=f"邮箱地址 {APP_EMAIL} 已复制到剪贴板",
@@ -1510,6 +1540,10 @@ class MainWindow(FluentWindow):
 
         self._center()
         QTimer.singleShot(400, self._greet)
+        # 启动后静默检查更新：仅发现有新版本时才提示，失败不打扰用户。
+        # 延迟 1.5s 避开启动期与管理员权限提示堆叠。
+        self._update_worker: UpdateCheckWorker | None = None
+        QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
 
     # ---------------------------------------------------------------- 辅助
     def _center(self) -> None:
@@ -1546,6 +1580,57 @@ class MainWindow(FluentWindow):
             if hasattr(page, "refreshTheme"):
                 page.refreshTheme()
 
+    def check_for_updates(self, manual: bool = False) -> None:
+        """检查 GitHub 最新 Release。manual=True 时无论结果都给出反馈。"""
+        if self._update_worker and self._update_worker.isRunning():
+            if manual:
+                InfoBar.info(title="正在检查更新",
+                             content="上一次检查尚未结束，请稍候。",
+                             orient=Qt.Horizontal, isClosable=True,
+                             position=InfoBarPosition.TOP_RIGHT, duration=3000, parent=self)
+            return
+        self._update_worker = UpdateCheckWorker(self)
+        self._update_worker.resultReady.connect(
+            lambda rel: self._on_update_checked(rel, manual))
+        self._update_worker.start()
+
+    def _on_update_checked(self, release: dict | None, manual: bool) -> None:
+        if not release:
+            if manual:
+                InfoBar.warning(
+                    title="检查更新失败",
+                    content="无法连接到 GitHub（可能被网络环境拦截），请稍后再试。",
+                    orient=Qt.Horizontal, isClosable=True,
+                    position=InfoBarPosition.TOP_RIGHT, duration=5000, parent=self)
+            return
+
+        latest = release.get("tag", "")
+        if not updatecheck.has_new_version(latest, APP_VERSION):
+            if manual:
+                InfoBar.success(
+                    title="已是最新版本",
+                    content=f"当前版本 {APP_VERSION}，没有发现新版本。",
+                    orient=Qt.Horizontal, isClosable=True,
+                    position=InfoBarPosition.TOP_RIGHT, duration=4000, parent=self)
+            return
+
+        # 有新版本：弹窗提示并提供下载入口
+        body = (release.get("body") or "").strip()
+        if len(body) > 400:
+            body = body[:400] + "…"
+        content = (f"当前版本 {APP_VERSION}，发现新版本 {latest}。\n\n")
+        if release.get("name") and release["name"] != latest:
+            content += f"{release['name']}\n\n"
+        if body:
+            content += "更新说明：\n" + body + "\n\n"
+        content += "是否前往下载页面？"
+
+        box = MessageBox("发现新版本", content, self)
+        box.yesButton.setText("去下载")
+        box.cancelButton.setText("稍后再说")
+        if box.exec():
+            QDesktopServices.openUrl(release.get("url", updatecheck.RELEASES_PAGE))
+
     def _greet(self) -> None:
         if is_admin():
             InfoBar.success(
@@ -1575,7 +1660,8 @@ class MainWindow(FluentWindow):
             worker.wait(3000)
         # 诊断线程只读不改配置，无需询问；但退出前需等待其结束，
         # 避免 QThread 仍在运行时被销毁导致进程崩溃
-        for diag_worker in (self.repairPage.diagWorker, self.diagnosePage.worker):
+        for diag_worker in (self.repairPage.diagWorker, self.diagnosePage.worker,
+                            getattr(self, "_update_worker", None)):
             if diag_worker and diag_worker.isRunning():
                 diag_worker.wait(3000)
         LOGGER.info("===== 程序退出 =====")
