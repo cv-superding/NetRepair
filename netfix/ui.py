@@ -1640,7 +1640,8 @@ class MainWindow(FluentWindow):
                     position=InfoBarPosition.TOP_RIGHT, duration=4000, parent=self)
             return
 
-        # 有新版本：弹窗提示。打包态可一键更新，源码态引导去 GitHub。
+        # 有新版本：弹窗提示。仅 onefile 打包态可一键更新；
+        # 源码态与 onedir 目录版都引导去 GitHub 手动下载（onedir 不能只换 exe）。
         body = (release.get("body") or "").strip()
         if len(body) > 400:
             body = body[:400] + "…"
@@ -1650,19 +1651,22 @@ class MainWindow(FluentWindow):
         if body:
             content += "更新说明：\n" + body + "\n\n"
 
-        frozen = updatecheck.is_frozen()
-        if frozen:
+        can_auto = updatecheck.is_frozen() and not updatecheck.is_onedir_layout()
+        if can_auto:
             content += "点击「立即更新」将自动下载新版本并在退出后完成替换与重启。"
+        elif updatecheck.is_onedir_layout():
+            content += ("当前为目录版（onedir），无法自动更新。将打开 GitHub 页面，"
+                        "请下载 onedir.zip 手动替换整个目录。")
         else:
             content += "当前为源码运行模式，无法自动替换。将打开 GitHub 页面手动下载。"
 
         box = MessageBox("发现新版本", content, self)
-        box.yesButton.setText("立即更新" if frozen else "去下载")
+        box.yesButton.setText("立即更新" if can_auto else "去下载")
         box.cancelButton.setText("稍后再说")
         if not box.exec():
             return
 
-        if frozen:
+        if can_auto:
             self._pending_release = release
             self._start_update_download(release)
         else:
@@ -1713,7 +1717,11 @@ class MainWindow(FluentWindow):
             asset = updatecheck.find_asset(release, ".exe") or {}
             expected = int(asset.get("size") or 0)
             actual = os.path.getsize(path)
-            if expected and actual < expected * 0.95:
+            # 严格校验：必须有声明大小，且实际大小完全一致，绝不允许残缺 exe
+            # 进入替换流程（download_file 内部也已做流式完整性校验）。
+            if expected <= 0:
+                raise ValueError("更新包未声明有效大小，拒绝替换")
+            if actual != expected:
                 raise ValueError(f"文件不完整（{actual} / {expected} 字节）")
 
             exe_path = updatecheck.current_exe()
@@ -1765,7 +1773,14 @@ class MainWindow(FluentWindow):
                             getattr(self, "_update_worker", None),
                             getattr(self, "_download_worker", None)):
             if diag_worker and diag_worker.isRunning():
-                diag_worker.wait(3000)
+                if not diag_worker.wait(3000):
+                    # 超时仍未结束：必须先终止并确认结束，否则父窗口销毁时
+                    # QThread 仍在运行会触发 std::terminate，导致进程崩溃。
+                    try:
+                        diag_worker.terminate()
+                        diag_worker.wait(1000)
+                    except Exception:  # noqa: BLE001
+                        pass
         LOGGER.info("===== 程序退出 =====")
         super().closeEvent(event)
 

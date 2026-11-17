@@ -39,10 +39,11 @@ TIMEOUT = 6
 
 
 def version_tuple(v: str) -> tuple[int, ...]:
-    """把版本号字符串规范化为可比较的整数元组。
+    """把版本号字符串规范化为**定长 3 段**的整数元组，便于正确比较。
 
-    兼容 ``"v1.3.1"`` / ``"1.3.1-beta"`` / ``"1.3"`` 等写法：
-    去掉 v 前缀与预发布/构建后缀，按 `.` 分段取数字，非数字段记为 0。
+    兼容 ``"v1.3.1"`` / ``"1.3.1-beta"`` / ``"1.4"`` 等写法：
+    去掉 v 前缀与预发布/构建后缀，按 `.` 分段取数字，不足 3 段补 0。
+    定长避免 ``(1,4) < (1,4,0)`` 这类位数不等导致的误判。
     """
     text = (v or "").strip().lstrip("vV")
     text = text.split("-", 1)[0].split("+", 1)[0]
@@ -50,12 +51,27 @@ def version_tuple(v: str) -> tuple[int, ...]:
     for seg in text.split("."):
         digits = "".join(ch for ch in seg if ch.isdigit())
         parts.append(int(digits) if digits else 0)
+    parts = (parts + [0, 0, 0])[:3]
     return tuple(parts)
 
 
-def has_new_version(latest: str, current: str = APP_VERSION) -> bool:
-    """latest 是否新于 current。无法解析时保守返回 False，不误报。"""
+def is_prerelease(v: str) -> bool:
+    """版本号是否带预发布标记（-beta / -rc1 / -alpha 等）。"""
+    text = (v or "").strip().lstrip("vV")
+    return "-" in text or "+" in text
+
+
+def has_new_version(latest: str, current: str = APP_VERSION,
+                    allow_prerelease: bool = False) -> bool:
+    """latest 是否新于 current。
+
+    - 默认拒绝预发布版（``v1.5.1-rc1`` 不会触发稳定版自动更新）；
+    - 定长 3 段比较，兼容位数不等；
+    - 无法解析时保守返回 False，不误报。
+    """
     try:
+        if not allow_prerelease and is_prerelease(latest):
+            return False
         return version_tuple(latest) > version_tuple(current)
     except (TypeError, ValueError):
         return False
@@ -121,6 +137,17 @@ def current_exe() -> str:
     return os.path.abspath(sys.executable)
 
 
+def is_onedir_layout() -> bool:
+    """当前是否为 PyInstaller onedir 目录版（exe 旁有 _internal 依赖目录）。
+
+    onedir 版不能靠替换单个 exe 更新——新版 exe 会依赖 `_internal` 里的
+    模块，只换 exe 会导致新旧混用崩溃。这类形态应引导用户手动下载 zip。
+    """
+    if not is_frozen():
+        return False
+    return os.path.isdir(os.path.join(os.path.dirname(current_exe()), "_internal"))
+
+
 def download_file(url: str, dest: str, progress=None, timeout: int = 30,
                   chunk: int = 256 * 1024) -> str:
     """流式下载文件到 dest，返回 dest 路径。
@@ -148,6 +175,12 @@ def download_file(url: str, dest: str, progress=None, timeout: int = 30,
                         progress(done, total)
                     except Exception:  # noqa: BLE001
                         pass
+    # 完整性校验：空文件或「已知总长但未下完」一律视为失败，
+    # 防止 0 字节 / 半截 exe 进入后续替换流程覆盖原程序。
+    if done <= 0:
+        raise IOError("下载结果为空（0 字节）")
+    if total and done != total:
+        raise IOError(f"下载不完整：{done}/{total} 字节")
     return dest
 
 
@@ -165,38 +198,70 @@ def write_update_script(exe_path: str, new_exe: str, script_path: str) -> str:
     def ps(s: str) -> str:
         return s.replace("'", "''")
 
+    log = os.path.join(tempfile.gettempdir(), "NetRepair_update.log")
     script = f"""$ErrorActionPreference = 'Stop'
 $target = '{ps(exe_path)}'
 $source = '{ps(new_exe)}'
-$oldPid = $args[0]
-# 等待旧进程退出（最多 30 秒），确保 exe 文件不再被占用
+$oldPid = [int]$args[0]
+$log = '{ps(log)}'
+function Log($m) {{
+  try {{ Add-Content -LiteralPath $log -Value ("$(Get-Date -Format o) " + $m) -ErrorAction SilentlyContinue }} catch {{}}
+}}
+function Fail($code, $msg) {{
+  Log "FAIL($code): $msg"
+  try {{
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show($msg, 'NetRepair 更新失败',
+      [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+  }} catch {{}}
+  exit $code
+}}
+Log "=== 开始更新 target=$target source=$source oldPid=$oldPid ==="
+# 等待旧进程真正退出（最多 30 秒），确保 exe 不再被占用
+$p = $null
 for ($i = 0; $i -lt 60; $i++) {{
   $p = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
   if (-not $p) {{ break }}
   Start-Sleep -Milliseconds 500
 }}
-# 备份旧版本，失败则中止替换（宁可不更新也不损坏原程序）
+# 退出后才覆盖：仍在运行说明等待超时或 PID 被复用，放弃替换以免损坏文件
+if ($p) {{ Fail 1 "旧进程未能正常退出（PID $oldPid 仍存在），已取消更新。请关闭所有 NetRepair 窗口后重试。" }}
+# 源文件校验：缺失或 0 字节直接放弃
+if (-not (Test-Path -LiteralPath $source)) {{ Fail 2 "下载文件不存在，已取消更新。" }}
+if ((Get-Item -LiteralPath $source).Length -le 0) {{ Fail 3 "下载文件为 0 字节，已取消更新。" }}
+# 备份旧版本，失败则中止（宁可不更新也不损坏原程序）
 $bak = "$target.bak"
 try {{
   Copy-Item -LiteralPath $target -Destination $bak -Force -ErrorAction Stop
+  Log "已备份旧版本到 $bak"
 }} catch {{
-  exit 1
+  Fail 4 "无法备份旧版本（可能权限不足）：$($_.Exception.Message)"
 }}
-# 用新版本覆盖；失败则尝试从备份还原
+# 用新版本覆盖；失败则回滚，并校验回滚确实成功
 try {{
   Copy-Item -LiteralPath $source -Destination $target -Force -ErrorAction Stop
+  Log "已用新版本覆盖"
 }} catch {{
-  Copy-Item -LiteralPath $bak -Destination $target -Force -ErrorAction SilentlyContinue
-  exit 2
+  $err = $_.Exception.Message
+  try {{
+    Copy-Item -LiteralPath $bak -Destination $target -Force -ErrorAction Stop
+    Log "覆盖失败但回滚成功：$err"
+  }} catch {{
+    Fail 5 "覆盖失败且回滚也失败，原程序可能已损坏：$err；回滚错误：$($_.Exception.Message)"
+  }}
+  Fail 6 "覆盖失败，已回滚到旧版本：$err"
 }}
 # 启动新版本
 try {{
   Start-Process -FilePath $target
+  Log "已启动新版本"
 }} catch {{
-  exit 3
+  Fail 7 "新版本已就位但启动失败，请手动运行 $target：$($_.Exception.Message)"
 }}
-# 清理临时下载
+# 清理临时下载与脚本自身
 Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
+Log "=== 更新完成 ==="
+try {{ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }} catch {{}}
 """
     with open(script_path, "w", encoding="utf-8-sig") as fh:
         fh.write(script)
@@ -214,7 +279,11 @@ def launch_update_script(script_path: str, pid: int) -> None:
 
 
 def temp_update_dir() -> str:
-    """创建并返回用于存放下载文件与更新脚本的临时目录。"""
-    path = os.path.join(tempfile.gettempdir(), "NetRepairUpdate")
+    """创建并返回**本次进程专属**的临时目录，避免多实例互相踩踏。
+
+    目录名带 PID，两个同时打开的 NetRepair 实例各用各的下载文件与脚本，
+    不会执行到被对方覆盖的脚本或校验到混合内容的文件。
+    """
+    path = os.path.join(tempfile.gettempdir(), f"NetRepairUpdate_{os.getpid()}")
     os.makedirs(path, exist_ok=True)
     return path
