@@ -14,10 +14,10 @@ option) any later version. See <https://www.gnu.org/licenses/>.
 from __future__ import annotations
 
 APP_NAME = "网络修复工具 NetRepair"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 APP_AUTHOR = "叶神鼬-丁"
 APP_EMAIL = "2943629243@qq.com"
-APP_RELEASE_DATE = "2026-11-16"
+APP_RELEASE_DATE = "2026-11-17"
 APP_LICENSE = "GNU General Public License v3.0"
 APP_LICENSE_SHORT = "GPLv3"
 APP_COPYRIGHT = "Copyright (C) 2026 叶神鼬-丁"

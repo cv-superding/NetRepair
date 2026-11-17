@@ -5,7 +5,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
-![Version](https://img.shields.io/badge/Version-1.3.1-2ea043)
+![Version](https://img.shields.io/badge/Version-1.4.0-2ea043)
 
 **NetRepair** 是一个完全在本地运行的 Windows 网络修复桌面程序。它把常见的 `netsh` / `ipconfig` / PowerShell 网络修复操作封装成可视化的「一键修复」与「逐项修复」，并配套一套双路网络诊断，先定位病因再做最小修复。
 
@@ -22,12 +22,16 @@
 - **代理环境专项诊断**：逐台验证网卡上配置的 DNS 是否真的响应、检测「跃点相同的多条默认路由」（双网卡出口摇摆）、检查 Clash Verge / Mihomo Party 的 DNS 覆写与引导 DNS 配置。针对的是「代理客户端所有节点都超时，但本机其实有网」这类故障。
 - **日志与备份**：修复前自动备份被修改的配置（Hosts、系统代理、防火墙策略等），日志落盘到 `%ProgramData%`，可追溯、可还原。
 - **Fluent Design 界面**：基于 QFluentWidgets 的 Windows 11 风格，支持 Mica 云母背景、亚克力侧边栏、明暗主题自适应、5 套主题色。
-- **检查更新**：启动时静默检查新版本（失败不打扰），关于页也提供手动检查按钮；发现新版本弹窗提示并给出下载入口。
+- **检查更新 / 应用内一键更新**：启动时静默检查新版本（失败不打扰），关于页也提供手动检查按钮；发现新版本弹窗提示，打包版可直接「立即更新」——自动下载、退出替换、重启，无需跳转 GitHub。
 - **零依赖分发**：PyInstaller 打包为单文件 exe（`NetRepair.exe`，无需安装任何依赖）；需要完整修复能力时右键「以管理员身份运行」即可。
 
 ---
 
 ## 📦 更新日志
+
+### v1.4.0（2026-11-17）
+- **应用内一键更新**：发现新版本后点「立即更新」，自动下载新版 exe、在退出后台替换文件并重启，无需再跳转 GitHub。下载带进度提示、完成后校验文件大小；替换前自动备份旧 exe，覆盖失败会回滚，绝不损坏原程序。
+- 源码运行（`python main.py`）时仍引导去 GitHub 手动下载，避免误替换 python.exe。
 
 ### v1.3.1（2026-11-16）
 - **新增检查更新**：启动时静默检查 GitHub 最新 Release，发现新版本才弹提示；关于页也有「检查更新」按钮可手动触发。检查失败静默跳过，不打扰排障。
@@ -97,8 +101,8 @@ python main.py
 
 前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新版：
 
-- `NetRepair-v1.3.1.exe`（单文件版，方便分享）
-- `NetRepair-v1.3.1-onedir.zip`（目录版，启动更快，约 2-3 秒）
+- `NetRepair-v1.4.0.exe`（单文件版，方便分享）
+- `NetRepair-v1.4.0-onedir.zip`（目录版，启动更快，约 2-3 秒）
 
 双击运行即可，**无需安装任何依赖**。需要完整修复能力（修改网络配置）时，请右键 →「以管理员身份运行」。
 
