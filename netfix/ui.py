@@ -79,6 +79,7 @@ from . import (
     APP_VERSION,
     diagnose,
     engine,
+    netinfo,
     updatecheck,
 )
 from .icons import app_icon, make_pixmap
@@ -337,6 +338,25 @@ class UpdateDownloadWorker(QThread):
         except Exception as exc:  # noqa: BLE001
             LOGGER.error(f"下载更新失败：{exc}")
             self.failed.emit(str(exc))
+
+
+class NetInfoWorker(QThread):
+    """后台采集网卡信息与公网 IP，结果通过信号回传 GUI 线程。"""
+
+    resultReady = Signal(object, str)   # (list[AdapterInfo], public_ip)
+
+    def run(self) -> None:  # noqa: D102
+        adapters: list = []
+        public_ip = ""
+        try:
+            adapters = netinfo.list_adapters()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(f"采集网卡信息异常：{exc}")
+        try:
+            public_ip = netinfo.fetch_public_ip()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(f"获取公网 IP 异常：{exc}")
+        self.resultReady.emit(adapters, public_ip)
 
 
 class LogBridge(QObject):
@@ -1131,6 +1151,155 @@ class BackupInterface(BaseInterface):
             c.refreshTheme()
 
 
+# ==================================================================== 网卡信息页
+
+class NetInfoInterface(BaseInterface):
+    """网卡详细信息：IP / 掩码 / 网关 / DNS / DHCP / MAC / 公网 IP。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__("netInfoInterface", parent)
+        self.vbox.setSpacing(16)
+        self.vbox.setContentsMargins(28, 16, 28, 30)
+        self.add_header("网卡信息", "当前网络配置一览 · 可切换网卡并刷新")
+
+        self._adapters: list = []
+        self._worker: NetInfoWorker | None = None
+
+        # ---- 操作卡：网卡选择 + 刷新 + 公网 IP
+        top = SimpleCardWidget(self.view)
+        top.setBorderRadius(12)
+        tl = QVBoxLayout(top)
+        tl.setContentsMargins(26, 20, 26, 20)
+        tl.setSpacing(12)
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(BodyLabel("网卡", top))
+        self.adapterCombo = ComboBox(top)
+        self.adapterCombo.setMinimumWidth(260)
+        self.adapterCombo.currentIndexChanged.connect(self._on_adapter_changed)
+        row.addWidget(self.adapterCombo, 1)
+        self.refreshBtn = PrimaryPushButton(FIF.SYNC, "刷新", top)
+        self.refreshBtn.setFixedHeight(32)
+        self.refreshBtn.clicked.connect(self.refresh)
+        row.addWidget(self.refreshBtn)
+        tl.addLayout(row)
+
+        pip_row = QHBoxLayout()
+        pip_row.setSpacing(8)
+        pip_row.addWidget(BodyLabel("公网 IP", top))
+        self.publicIpLabel = BodyLabel("获取中…", top)
+        self.publicIpLabel.setTextColor("#61666D", "#9AA3B2")
+        pip_row.addWidget(self.publicIpLabel)
+        pip_row.addStretch(1)
+        tl.addLayout(pip_row)
+        self.vbox.addWidget(top)
+
+        # ---- 详情卡：键值对
+        self.detailCard = SimpleCardWidget(self.view)
+        self.detailCard.setBorderRadius(12)
+        self.detailLayout = QVBoxLayout(self.detailCard)
+        self.detailLayout.setContentsMargins(26, 22, 26, 22)
+        self.detailLayout.setSpacing(2)
+        self.vbox.addWidget(self.detailCard)
+        self._show_empty("采集中…")
+        # 首次进入即后台采集，用户切到本页时通常已有数据
+        QTimer.singleShot(600, self.refresh)
+
+    # ---------------------------------------------------------------- 展示
+    def _kv_row(self, key: str, value: str, parent: QWidget) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        k = CaptionLabel(key, parent)
+        k.setFixedWidth(88)
+        k.setTextColor("#8A8F99", "#7C838F")
+        v = BodyLabel(value or "—", parent)
+        v.setWordWrap(True)
+        v.setTextColor("#3B4250", "#C6CBD5")
+        row.addWidget(k)
+        row.addWidget(v, 1)
+        return row
+
+    def _show_empty(self, text: str) -> None:
+        while self.detailLayout.count():
+            item = self.detailLayout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+        self.detailLayout.addWidget(BodyLabel(text, self.detailCard))
+
+    def _clear_layout(self, layout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+
+    def _render(self, adapter) -> None:
+        self._clear_layout(self.detailLayout)
+        self.detailLayout.addWidget(StrongBodyLabel(
+            adapter.name or "未命名网卡", self.detailCard))
+        if adapter.description:
+            desc = CaptionLabel(adapter.description, self.detailCard)
+            desc.setTextColor("#8A8F99", "#7C838F")
+            self.detailLayout.addWidget(desc)
+        self.detailLayout.addSpacing(10)
+
+        rows = (
+            ("IPv4 地址", "、".join(adapter.ipv4)),
+            ("子网掩码", adapter.mask),
+            ("默认网关", adapter.gateway),
+            ("DNS 服务器", "、".join(adapter.dns)),
+            ("DHCP 服务器", "、".join(adapter.dhcp)),
+            ("MAC 地址", adapter.mac),
+            ("链路速度", adapter.link_speed),
+            ("状态", adapter.status),
+        )
+        for key, value in rows:
+            self.detailLayout.addLayout(self._kv_row(key, value, self.detailCard))
+
+    def _on_adapter_changed(self, index: int) -> None:
+        if 0 <= index < len(self._adapters):
+            self._render(self._adapters[index])
+
+    # ---------------------------------------------------------------- 采集
+    def refresh(self) -> None:
+        if self._worker and self._worker.isRunning():
+            return
+        self.refreshBtn.setEnabled(False)
+        self.publicIpLabel.setText("获取中…")
+        self._worker = NetInfoWorker(self)
+        self._worker.resultReady.connect(self._on_result)
+        self._worker.start()
+
+    def _on_result(self, adapters: list, public_ip: str) -> None:
+        self.refreshBtn.setEnabled(True)
+        self._adapters = list(adapters or [])
+        self.publicIpLabel.setText(public_ip or "获取失败（不影响本地信息）")
+
+        current = self.adapterCombo.currentIndex()
+        self.adapterCombo.blockSignals(True)
+        self.adapterCombo.clear()
+        for a in self._adapters:
+            self.adapterCombo.addItem(f"{a.name}  ({a.status or '未知'})")
+        self.adapterCombo.blockSignals(False)
+
+        if not self._adapters:
+            self._show_empty("未采集到网卡信息（可能需要管理员权限）")
+            return
+        # 优先选中「已连接且有网关」的网卡，其次保留原选择
+        preferred = next(
+            (i for i, a in enumerate(self._adapters)
+             if a.status == "Up" and a.gateway),
+            None,
+        )
+        idx = preferred if preferred is not None else (current if 0 <= current < len(self._adapters) else 0)
+        self.adapterCombo.setCurrentIndex(idx)
+        self._render(self._adapters[idx])
+
+
 # ==================================================================== 关于页
 
 class AboutInterface(BaseInterface):
@@ -1539,10 +1708,12 @@ class MainWindow(FluentWindow):
         self.diagnosePage = DiagnoseInterface(self)
         self.logPage = LogInterface(self)
         self.backupPage = BackupInterface(self)
+        self.netInfoPage = NetInfoInterface(self)
         self.aboutPage = AboutInterface(self)
 
         self.addSubInterface(self.repairPage, FIF.BROOM, "一键修复")
         self.addSubInterface(self.diagnosePage, FIF.WIFI, "网络诊断")
+        self.addSubInterface(self.netInfoPage, FIF.UPDATE, "网卡信息")
         self.addSubInterface(self.logPage, FIF.HISTORY, "运行日志")
         self.addSubInterface(self.backupPage, FIF.FOLDER, "备份还原")
         self.addSubInterface(self.aboutPage, FIF.INFO, "关于",
@@ -1769,9 +1940,11 @@ class MainWindow(FluentWindow):
             worker.wait(3000)
         # 诊断线程只读不改配置，无需询问；但退出前需等待其结束，
         # 避免 QThread 仍在运行时被销毁导致进程崩溃
+        netinfo_worker = getattr(self.netInfoPage, "_worker", None) if hasattr(self, "netInfoPage") else None
         for diag_worker in (self.repairPage.diagWorker, self.diagnosePage.worker,
                             getattr(self, "_update_worker", None),
-                            getattr(self, "_download_worker", None)):
+                            getattr(self, "_download_worker", None),
+                            netinfo_worker):
             if diag_worker and diag_worker.isRunning():
                 if not diag_worker.wait(3000):
                     # 超时仍未结束：必须先终止并确认结束，否则父窗口销毁时
