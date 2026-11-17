@@ -5,7 +5,7 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
-![Version](https://img.shields.io/badge/Version-1.4.0-2ea043)
+![Version](https://img.shields.io/badge/Version-1.4.1-2ea043)
 
 **NetRepair** 是一个完全在本地运行的 Windows 网络修复桌面程序。它把常见的 `netsh` / `ipconfig` / PowerShell 网络修复操作封装成可视化的「一键修复」与「逐项修复」，并配套一套双路网络诊断，先定位病因再做最小修复。
 
@@ -28,6 +28,11 @@
 ---
 
 ## 📦 更新日志
+
+### v1.4.1（2026-11-17）
+- **修复应用内更新的 8 项安全缺陷**（4 项高危）：关窗时 QThread 崩溃、损坏/0 字节 exe 覆盖原程序、onedir 版只换 exe 导致新旧依赖混用、替换脚本失败静默且回滚不可靠。
+- 另修复：预发布版误自动安装、临时目录多实例踩踏、进程退出未校验即替换、版本号位数不等比较错误。
+- 替换失败现在会写日志并在界面弹出可见错误，不再"退出后什么都没发生"。
 
 ### v1.4.0（2026-11-17）
 - **应用内一键更新**：发现新版本后点「立即更新」，自动下载新版 exe、在退出后台替换文件并重启，无需再跳转 GitHub。下载带进度提示、完成后校验文件大小；替换前自动备份旧 exe，覆盖失败会回滚，绝不损坏原程序。
@@ -101,8 +106,8 @@ python main.py
 
 前往 [Releases](https://github.com/cv-superding/NetRepair/releases) 下载最新版：
 
-- `NetRepair-v1.4.0.exe`（单文件版，方便分享）
-- `NetRepair-v1.4.0-onedir.zip`（目录版，启动更快，约 2-3 秒）
+- `NetRepair-v1.4.1.exe`（单文件版，方便分享）
+- `NetRepair-v1.4.1-onedir.zip`（目录版，启动更快，约 2-3 秒）
 
 双击运行即可，**无需安装任何依赖**。需要完整修复能力（修改网络配置）时，请右键 →「以管理员身份运行」。
 
