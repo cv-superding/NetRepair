@@ -315,6 +315,30 @@ class UpdateCheckWorker(QThread):
             self.resultReady.emit(None)
 
 
+class UpdateDownloadWorker(QThread):
+    """后台下载新版 exe，进度与结果通过信号回传 GUI 线程。"""
+
+    progressed = Signal(int, int)       # done, total（total 可能为 0）
+    downloadDone = Signal(str)          # 下载后的临时路径
+    failed = Signal(str)                # 错误信息
+
+    def __init__(self, url: str, dest: str, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self.url = url
+        self.dest = dest
+
+    def run(self) -> None:  # noqa: D102
+        def cb(done: int, total: int) -> None:
+            self.progressed.emit(done, total)
+
+        try:
+            path = updatecheck.download_file(self.url, self.dest, progress=cb)
+            self.downloadDone.emit(path)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error(f"下载更新失败：{exc}")
+            self.failed.emit(str(exc))
+
+
 class LogBridge(QObject):
     """把子线程日志安全地转发到 GUI 线程。"""
 
@@ -1543,6 +1567,8 @@ class MainWindow(FluentWindow):
         # 启动后静默检查更新：仅发现有新版本时才提示，失败不打扰用户。
         # 延迟 1.5s 避开启动期与管理员权限提示堆叠。
         self._update_worker: UpdateCheckWorker | None = None
+        self._download_worker: UpdateDownloadWorker | None = None
+        self._pending_release: dict | None = None
         QTimer.singleShot(1500, lambda: self.check_for_updates(manual=False))
 
     # ---------------------------------------------------------------- 辅助
@@ -1614,7 +1640,7 @@ class MainWindow(FluentWindow):
                     position=InfoBarPosition.TOP_RIGHT, duration=4000, parent=self)
             return
 
-        # 有新版本：弹窗提示并提供下载入口
+        # 有新版本：弹窗提示。打包态可一键更新，源码态引导去 GitHub。
         body = (release.get("body") or "").strip()
         if len(body) > 400:
             body = body[:400] + "…"
@@ -1623,13 +1649,88 @@ class MainWindow(FluentWindow):
             content += f"{release['name']}\n\n"
         if body:
             content += "更新说明：\n" + body + "\n\n"
-        content += "是否前往下载页面？"
+
+        frozen = updatecheck.is_frozen()
+        if frozen:
+            content += "点击「立即更新」将自动下载新版本并在退出后完成替换与重启。"
+        else:
+            content += "当前为源码运行模式，无法自动替换。将打开 GitHub 页面手动下载。"
 
         box = MessageBox("发现新版本", content, self)
-        box.yesButton.setText("去下载")
+        box.yesButton.setText("立即更新" if frozen else "去下载")
         box.cancelButton.setText("稍后再说")
-        if box.exec():
+        if not box.exec():
+            return
+
+        if frozen:
+            self._pending_release = release
+            self._start_update_download(release)
+        else:
             QDesktopServices.openUrl(release.get("url", updatecheck.RELEASES_PAGE))
+
+    def _start_update_download(self, release: dict) -> None:
+        """找到 exe 资源并在后台下载，进度用 InfoBar 提示。"""
+        asset = updatecheck.find_asset(release, ".exe")
+        if not asset:
+            InfoBar.warning(
+                title="无法自动更新", content="新版本未提供 exe 安装包，请前往 GitHub 手动下载。",
+                orient=Qt.Horizontal, isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT, duration=5000, parent=self)
+            QDesktopServices.openUrl(release.get("url", updatecheck.RELEASES_PAGE))
+            return
+        if self._download_worker and self._download_worker.isRunning():
+            return
+
+        temp_dir = updatecheck.temp_update_dir()
+        dest = os.path.join(temp_dir, asset["name"])
+        self._download_worker = UpdateDownloadWorker(asset["url"], dest, self)
+        self._download_worker.progressed.connect(self._on_download_progress)
+        self._download_worker.downloadDone.connect(
+            lambda path: self._on_download_done(path, release))
+        self._download_worker.failed.connect(self._on_download_failed)
+        self._download_worker.start()
+        InfoBar.info(
+            title="正在下载更新",
+            content=f"正在下载 {asset['name']}，请稍候…",
+            orient=Qt.Horizontal, isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT, duration=3000, parent=self)
+
+    def _on_download_progress(self, done: int, total: int) -> None:
+        # 下载在后台进行，这里不逐帧弹 InfoBar；仅通过日志留痕。
+        if total > 0 and done >= total:
+            LOGGER.info("更新下载完成，准备替换")
+
+    def _on_download_failed(self, err: str) -> None:
+        InfoBar.error(
+            title="下载失败",
+            content=f"更新下载失败：{err[:120]}。请检查网络或前往 GitHub 手动下载。",
+            orient=Qt.Horizontal, isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT, duration=6000, parent=self)
+
+    def _on_download_done(self, path: str, release: dict) -> None:
+        """下载完成：校验大小 → 生成替换脚本 → 启动脚本 → 退出当前进程。"""
+        try:
+            asset = updatecheck.find_asset(release, ".exe") or {}
+            expected = int(asset.get("size") or 0)
+            actual = os.path.getsize(path)
+            if expected and actual < expected * 0.95:
+                raise ValueError(f"文件不完整（{actual} / {expected} 字节）")
+
+            exe_path = updatecheck.current_exe()
+            script_path = os.path.join(updatecheck.temp_update_dir(), "apply_update.ps1")
+            updatecheck.write_update_script(exe_path, path, script_path)
+            updatecheck.launch_update_script(script_path, os.getpid())
+        except Exception as exc:  # noqa: BLE001
+            self._on_download_failed(str(exc))
+            return
+
+        # 一切就绪，退出当前进程，由脚本完成替换与重启
+        InfoBar.success(
+            title="更新已下载",
+            content="程序即将退出以完成更新并自动重启，请勿强行关闭电源。",
+            orient=Qt.Horizontal, isClosable=True,
+            position=InfoBarPosition.TOP_RIGHT, duration=4000, parent=self)
+        QTimer.singleShot(800, self.close)
 
     def _greet(self) -> None:
         if is_admin():
@@ -1661,7 +1762,8 @@ class MainWindow(FluentWindow):
         # 诊断线程只读不改配置，无需询问；但退出前需等待其结束，
         # 避免 QThread 仍在运行时被销毁导致进程崩溃
         for diag_worker in (self.repairPage.diagWorker, self.diagnosePage.worker,
-                            getattr(self, "_update_worker", None)):
+                            getattr(self, "_update_worker", None),
+                            getattr(self, "_download_worker", None)):
             if diag_worker and diag_worker.isRunning():
                 diag_worker.wait(3000)
         LOGGER.info("===== 程序退出 =====")
